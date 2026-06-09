@@ -319,7 +319,7 @@ footer{padding:16px 28px;text-align:center;font-size:12px;color:var(--text3);bor
 
 <script>
 // ── Config ────────────────────────────────────────────────────────
-const WS_URL = `ws://${location.host}`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
 const CHUNK  = 64 * 1024; // 64 KB per chunk
 const ICE    = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
