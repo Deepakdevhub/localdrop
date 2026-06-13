@@ -319,9 +319,34 @@ footer{padding:16px 28px;text-align:center;font-size:12px;color:var(--text3);bor
 
 <script>
 // ── Config ────────────────────────────────────────────────────────
-const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+const WS_URL = `ws://${location.host}`;
 const CHUNK  = 64 * 1024; // 64 KB per chunk
-const ICE    = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+async function getTurnCredentials() {
+  const secret = '960ee2cc2a938c15544ce1535fdfd5776e07f4d7b3883fa7ea30fb1485bb1f77';
+  const user = Math.floor(Date.now() / 1000) + 24 * 3600;
+  const username = `${user}:localdrop`;
+  const encoder = new TextEncoder();
+  const keyData = encoder.encode(secret);
+  const messageData = encoder.encode(username);
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw', keyData, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
+  const credential = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  return { username, credential };
+}
+
+async function buildICE() {
+  const { username, credential } = await getTurnCredentials();
+  return {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:3.27.246.70:3478' },
+      { urls: 'turn:3.27.246.70:3478', username, credential },
+      { urls: 'turn:3.27.246.70:3478?transport=tcp', username, credential }
+    ]
+  };
+}
 
 // ── State ─────────────────────────────────────────────────────────
 let ws      = null;
@@ -453,10 +478,12 @@ function joinRoom() {
 
 // ── WebRTC — host side (initiates offer) ──────────────────────────
 async function initPeerAsHost(peerId) {
-  const pc = newPC(peerId);
+  const iceConfig = await buildICE();
+  const pc = new RTCPeerConnection(iceConfig);
   const dc = pc.createDataChannel("filedrop");
   peers.set(peerId, { pc, dc, name: shortId(peerId) });
   setupDC(peerId, dc);
+  setupPCEvents(pc, peerId);
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -466,8 +493,10 @@ async function initPeerAsHost(peerId) {
 // ── WebRTC — peer side (receives offer, sends answer) ─────────────
 async function handleSignal(from, payload) {
   if (payload.type === "offer") {
-    const pc = newPC(from);
+    const iceConfig = await buildICE();
+    const pc = new RTCPeerConnection(iceConfig);
     peers.set(from, { pc, dc: null, name: shortId(from) });
+    setupPCEvents(pc, from);
 
     pc.ondatachannel = (e) => {
       const p = peers.get(from);
@@ -494,20 +523,32 @@ async function handleSignal(from, payload) {
   }
 }
 
-function newPC(peerId) {
-  const pc = new RTCPeerConnection(ICE);
+function setupPCEvents(pc, peerId) {
+  const timeout = setTimeout(() => {
+    if (pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'completed') {
+      setStatus('s-status', 'Connection failed. Ask receiver to rejoin.', 'err');
+      show('s-progress');
+    }
+  }, 15000);
+
   pc.onicecandidate = (e) => {
     if (!e.candidate) return;
     const to = role === "host" ? peerId : "host";
     sendWS({ type: "signal", roomId, to, from: myId || "host", payload: e.candidate });
   };
   pc.oniceconnectionstatechange = () => {
+    console.log('ICE state:', pc.iceConnectionState);
+    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+      clearTimeout(timeout);
+    }
     if (pc.iceConnectionState === "disconnected" || pc.iceConnectionState === "failed") {
+      clearTimeout(timeout);
       peers.delete(peerId);
       refreshPeerList();
+      setStatus('s-status', 'Peer disconnected. Ask them to rejoin.', 'err');
+      show('s-progress');
     }
   };
-  return pc;
 }
 
 // ── DataChannel ───────────────────────────────────────────────────
